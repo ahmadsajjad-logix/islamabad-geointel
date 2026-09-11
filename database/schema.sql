@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS pois (
     longitude REAL NOT NULL,
 
     sector TEXT,
+    sector_status TEXT NOT NULL,
     address TEXT,
 
     tags_json TEXT NOT NULL DEFAULT '{}',
@@ -34,6 +35,9 @@ ON pois(subcategory);
 
 CREATE INDEX IF NOT EXISTS idx_pois_sector
 ON pois(sector);
+
+CREATE INDEX IF NOT EXISTS idx_pois_sector_status
+ON pois(sector_status);
 
 CREATE INDEX IF NOT EXISTS idx_pois_name
 ON pois(name);
