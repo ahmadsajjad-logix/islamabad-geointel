@@ -230,3 +230,188 @@ def upsert_poi(
     )
 
     return "updated" if exists else "inserted"
+def search_pois(
+    connection: sqlite3.Connection,
+    *,
+    category: str | None = None,
+    subcategory: str | None = None,
+    sector: str | None = None,
+    name: str | None = None,
+    limit: int = 100,
+) -> list[sqlite3.Row]:
+    """
+    Search POIs using optional normalized database filters.
+
+    All supplied filters are combined with AND.
+
+    Args:
+        connection:
+            Open SQLite connection.
+
+        category:
+            Exact normalized category match.
+
+        subcategory:
+            Exact normalized subcategory match.
+
+        sector:
+            Exact normalized sector match.
+
+        name:
+            Case-insensitive partial POI name match.
+
+        limit:
+            Maximum number of rows returned.
+
+    Returns:
+        Matching POI rows ordered by name and database ID.
+    """
+
+    if limit < 1:
+        raise ValueError("limit must be at least 1.")
+
+    conditions: list[str] = []
+    parameters: list[Any] = []
+
+    if category is not None:
+        conditions.append("category = ?")
+        parameters.append(category)
+
+    if subcategory is not None:
+        conditions.append("subcategory = ?")
+        parameters.append(subcategory)
+
+    if sector is not None:
+        conditions.append("sector = ?")
+        parameters.append(sector)
+
+    if name is not None:
+        cleaned_name = name.strip()
+
+        if not cleaned_name:
+            raise ValueError(
+                "name must contain non-whitespace characters."
+            )
+
+        conditions.append(
+            "LOWER(COALESCE(name, '')) LIKE LOWER(?)"
+        )
+        parameters.append(f"%{cleaned_name}%")
+
+    sql = """
+        SELECT
+            id,
+            osm_type,
+            osm_id,
+            name,
+            category,
+            subcategory,
+            latitude,
+            longitude,
+            sector,
+            sector_status,
+            address,
+            tags_json,
+            source,
+            imported_at,
+            updated_at
+        FROM pois
+    """
+
+    if conditions:
+        sql += "\nWHERE " + "\n  AND ".join(conditions)
+
+    sql += """
+        ORDER BY
+            CASE WHEN name IS NULL THEN 1 ELSE 0 END,
+            name COLLATE NOCASE,
+            id
+        LIMIT ?
+    """
+
+    parameters.append(limit)
+
+    return connection.execute(
+        sql,
+        parameters,
+    ).fetchall()
+def count_pois_by_category(
+    connection: sqlite3.Connection,
+    *,
+    sector: str | None = None,
+) -> list[sqlite3.Row]:
+    """
+    Count searchable POIs grouped by normalized category.
+
+    If sector is supplied, only POIs with that stored sector
+    attribution are included.
+    """
+
+    if sector is None:
+        return connection.execute(
+            """
+            SELECT
+                category,
+                COUNT(*) AS poi_count
+            FROM pois
+            GROUP BY category
+            ORDER BY poi_count DESC, category
+            """
+        ).fetchall()
+
+    return connection.execute(
+        """
+        SELECT
+            category,
+            COUNT(*) AS poi_count
+        FROM pois
+        WHERE sector = ?
+        GROUP BY category
+        ORDER BY poi_count DESC, category
+        """,
+        (sector,),
+    ).fetchall()
+
+
+def count_pois_by_sector(
+    connection: sqlite3.Connection,
+    *,
+    category: str | None = None,
+) -> list[sqlite3.Row]:
+    """
+    Count POIs grouped by stored sector attribution.
+
+    Only POIs with a non-NULL sector are included. Unassigned and
+    ambiguous POIs remain in the database but are not falsely assigned
+    to a sector for statistical purposes.
+
+    If category is supplied, only that normalized category is counted.
+    """
+
+    if category is None:
+        return connection.execute(
+            """
+            SELECT
+                sector,
+                COUNT(*) AS poi_count
+            FROM pois
+            WHERE sector IS NOT NULL
+            GROUP BY sector
+            ORDER BY poi_count DESC, sector
+            """
+        ).fetchall()
+
+    return connection.execute(
+        """
+        SELECT
+            sector,
+            COUNT(*) AS poi_count
+        FROM pois
+        WHERE
+            sector IS NOT NULL
+            AND category = ?
+        GROUP BY sector
+        ORDER BY poi_count DESC, sector
+        """,
+        (category,),
+    ).fetchall()

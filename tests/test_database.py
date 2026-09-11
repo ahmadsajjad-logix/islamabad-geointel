@@ -1,6 +1,8 @@
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 from src.database.repository import (
     complete_import_run,
     create_import_run,
@@ -202,3 +204,287 @@ def test_import_run_audit_record() -> None:
         assert completed["completed_at"] is not None
     finally:
         connection.close()
+def test_search_pois_filters_and_name_matching() -> None:
+    from src.database.repository import search_pois
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+
+    schema_path = (
+        Path(__file__).resolve().parents[1]
+        / "database"
+        / "schema.sql"
+    )
+    connection.executescript(
+        schema_path.read_text(encoding="utf-8")
+    )
+
+    base_poi = {
+        "osm_type": "node",
+        "category": "healthcare",
+        "subcategory": "hospital",
+        "latitude": 33.72,
+        "longitude": 73.06,
+        "sector": "F-6",
+        "sector_status": "strong_explicit",
+        "address": "Islamabad",
+        "tags_json": "{}",
+        "source": "OpenStreetMap",
+    }
+
+    first_poi = {
+        **base_poi,
+        "osm_id": 1001,
+        "name": "Alpha Hospital",
+    }
+
+    second_poi = {
+        **base_poi,
+        "osm_id": 1002,
+        "name": "Beta Medical Centre",
+        "subcategory": "clinic",
+        "sector": "F-7",
+    }
+
+    third_poi = {
+        **base_poi,
+        "osm_id": 1003,
+        "name": "Alpha Cafe",
+        "category": "food_drink",
+        "subcategory": "cafe",
+    }
+
+    upsert_poi(connection, first_poi)
+    upsert_poi(connection, second_poi)
+    upsert_poi(connection, third_poi)
+
+    healthcare_rows = search_pois(
+        connection,
+        category="healthcare",
+    )
+    assert len(healthcare_rows) == 2
+
+    f6_healthcare_rows = search_pois(
+        connection,
+        category="healthcare",
+        sector="F-6",
+    )
+    assert len(f6_healthcare_rows) == 1
+    assert f6_healthcare_rows[0]["name"] == "Alpha Hospital"
+
+    clinic_rows = search_pois(
+        connection,
+        subcategory="clinic",
+    )
+    assert len(clinic_rows) == 1
+    assert clinic_rows[0]["name"] == "Beta Medical Centre"
+
+    name_rows = search_pois(
+        connection,
+        name="ALPHA",
+    )
+    assert len(name_rows) == 2
+
+    connection.close()
+
+
+def test_search_pois_rejects_invalid_limit() -> None:
+    from src.database.repository import search_pois
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+
+    with pytest.raises(
+        ValueError,
+        match="limit must be at least 1",
+    ):
+        search_pois(
+            connection,
+            limit=0,
+        )
+
+    connection.close()
+def test_count_pois_by_category() -> None:
+    from src.database.repository import count_pois_by_category
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+
+    schema_path = (
+        Path(__file__).resolve().parents[1]
+        / "database"
+        / "schema.sql"
+    )
+    connection.executescript(
+        schema_path.read_text(encoding="utf-8")
+    )
+
+    pois = [
+        {
+            "osm_type": "node",
+            "osm_id": 6001,
+            "name": "Hospital One",
+            "category": "healthcare",
+            "subcategory": "hospital",
+            "latitude": 33.72,
+            "longitude": 73.06,
+            "sector": "F-6",
+            "sector_status": "strong_explicit",
+            "address": "Islamabad",
+            "tags_json": "{}",
+            "source": "OpenStreetMap",
+        },
+        {
+            "osm_type": "node",
+            "osm_id": 6002,
+            "name": "Clinic One",
+            "category": "healthcare",
+            "subcategory": "clinic",
+            "latitude": 33.73,
+            "longitude": 73.07,
+            "sector": "F-7",
+            "sector_status": "strong_explicit",
+            "address": "Islamabad",
+            "tags_json": "{}",
+            "source": "OpenStreetMap",
+        },
+        {
+            "osm_type": "node",
+            "osm_id": 6003,
+            "name": "Cafe One",
+            "category": "food_drink",
+            "subcategory": "cafe",
+            "latitude": 33.74,
+            "longitude": 73.08,
+            "sector": "F-6",
+            "sector_status": "strong_explicit",
+            "address": "Islamabad",
+            "tags_json": "{}",
+            "source": "OpenStreetMap",
+        },
+    ]
+
+    for poi in pois:
+        upsert_poi(connection, poi)
+
+    rows = count_pois_by_category(connection)
+
+    counts = {
+        row["category"]: row["poi_count"]
+        for row in rows
+    }
+
+    assert counts == {
+        "healthcare": 2,
+        "food_drink": 1,
+    }
+
+    f6_rows = count_pois_by_category(
+        connection,
+        sector="F-6",
+    )
+
+    f6_counts = {
+        row["category"]: row["poi_count"]
+        for row in f6_rows
+    }
+
+    assert f6_counts == {
+        "food_drink": 1,
+        "healthcare": 1,
+    }
+
+    connection.close()
+
+
+def test_count_pois_by_sector_excludes_unassigned() -> None:
+    from src.database.repository import count_pois_by_sector
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+
+    schema_path = (
+        Path(__file__).resolve().parents[1]
+        / "database"
+        / "schema.sql"
+    )
+    connection.executescript(
+        schema_path.read_text(encoding="utf-8")
+    )
+
+    pois = [
+        {
+            "osm_type": "node",
+            "osm_id": 7001,
+            "name": "F6 Hospital",
+            "category": "healthcare",
+            "subcategory": "hospital",
+            "latitude": 33.72,
+            "longitude": 73.06,
+            "sector": "F-6",
+            "sector_status": "strong_explicit",
+            "address": "Islamabad",
+            "tags_json": "{}",
+            "source": "OpenStreetMap",
+        },
+        {
+            "osm_type": "node",
+            "osm_id": 7002,
+            "name": "F7 Hospital",
+            "category": "healthcare",
+            "subcategory": "hospital",
+            "latitude": 33.73,
+            "longitude": 73.07,
+            "sector": "F-7",
+            "sector_status": "street_pilot_only",
+            "address": "Islamabad",
+            "tags_json": "{}",
+            "source": "OpenStreetMap",
+        },
+        {
+            "osm_type": "node",
+            "osm_id": 7003,
+            "name": "Unassigned Hospital",
+            "category": "healthcare",
+            "subcategory": "hospital",
+            "latitude": 33.74,
+            "longitude": 73.08,
+            "sector": None,
+            "sector_status": "unassigned",
+            "address": "Islamabad",
+            "tags_json": "{}",
+            "source": "OpenStreetMap",
+        },
+    ]
+
+    for poi in pois:
+        upsert_poi(connection, poi)
+
+    rows = count_pois_by_sector(connection)
+
+    counts = {
+        row["sector"]: row["poi_count"]
+        for row in rows
+    }
+
+    assert counts == {
+        "F-6": 1,
+        "F-7": 1,
+    }
+
+    healthcare_rows = count_pois_by_sector(
+        connection,
+        category="healthcare",
+    )
+
+    healthcare_counts = {
+        row["sector"]: row["poi_count"]
+        for row in healthcare_rows
+    }
+
+    assert healthcare_counts == {
+        "F-6": 1,
+        "F-7": 1,
+    }
+
+    connection.close()
