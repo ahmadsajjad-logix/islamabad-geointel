@@ -41,4 +41,3 @@ data/raw/*
 *.db-shm
 *.db-wal
 # Generated local GeoIntel database
-database/geointel.db
