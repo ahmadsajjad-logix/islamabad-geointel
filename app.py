@@ -16,6 +16,8 @@ from src.database.repository import (
     search_pois,
 )
 from src.search.search_service import search_within_radius
+from src.ai.query_parser import parse_query
+from src.ai.query_executor import execute_query_plan
 
 STANDARD_MAP_MARKER_LIMIT = 250
 
@@ -180,7 +182,8 @@ try:
         )
 
         st.caption(
-            "Pilot coverage: F-5, F-6 and F-7. "
+            "Pilot coverage: F-5, F-6 and F-7. Results reflect the local "
+            "OSM-derived pilot database, not a complete Islamabad directory. "
             "Sector attribution is evidence-based; proximity is not used to infer a sector."
         )
 
@@ -188,13 +191,20 @@ try:
 
         st.subheader("Search Places")
 
+        def _on_search_mode_change():
+            """Clear stale Folium click state when changing search modes."""
+            st.session_state.pop("last_native_map_click", None)
+
         search_mode = st.radio(
             "Search mode",
             [
                 "Standard Search",
                 "Proximity Search",
+                "Natural Language Search",
             ],
             horizontal=True,
+            key="search_mode",
+            on_change=_on_search_mode_change,
         )
 
         if "emergency_quick_search" not in st.session_state:
@@ -249,6 +259,21 @@ try:
 
         if origin_sync_received:
             st.session_state.auto_location_pending = False
+
+        nl_query = ""
+        nl_plan = None
+
+        if search_mode == "Natural Language Search":
+            st.markdown("#### Ask Islamabad GeoIntel")
+            nl_query = st.text_input(
+                "Natural-language query",
+                placeholder="e.g. hospitals in F-6, nearest hospital, emergency within 2 km",
+                key="natural_language_query",
+            )
+            st.caption(
+                "Queries are parsed locally into constrained database filters. "
+                "The system does not invent places, sectors, or coordinates."
+            )
 
         search_col_1, search_col_2, search_col_3 = st.columns(3)
 
@@ -472,10 +497,10 @@ try:
                 "When Proximity Search is opened, the browser requests your "
                 "device location and uses the returned coordinates when available. "
                 "The local OSM pilot database may not contain a name or POI for "
-                "that exact location. Optional Google identification will be kept "
-                "separate from the local database. You can still enter coordinates "
-                "manually, tap a POI, or tap empty map space. The origin is not "
-                "used to infer or assign a POI's sector."
+                "that exact location. You can still enter coordinates manually, "
+                "tap a POI, or tap empty map space. The origin is not used to "
+                "infer or assign a POI's sector. Google Maps links are outbound "
+                "navigation links only; no Google Places or geocoding API is used."
             )
 
         category_filter = (
@@ -512,6 +537,29 @@ try:
                 name=name_filter,
                 limit=1000,
             )
+        elif search_mode == "Natural Language Search":
+            if nl_query.strip():
+                nl_plan = parse_query(nl_query)
+                if not nl_plan.understood:
+                    st.warning(nl_plan.message or "The query could not be interpreted safely.")
+                    results = []
+                elif nl_plan.requires_origin:
+                    nl_latitude = float(st.session_state.proximity_latitude_input)
+                    nl_longitude = float(st.session_state.proximity_longitude_input)
+                    results = execute_query_plan(
+                        connection,
+                        nl_plan,
+                        latitude=nl_latitude,
+                        longitude=nl_longitude,
+                    )
+                    st.info(
+                        "Natural-language geographic origin: "
+                        f"{nl_latitude:.7f}, {nl_longitude:.7f}"
+                    )
+                else:
+                    results = execute_query_plan(connection, nl_plan)
+            else:
+                results = []
         else:
             results = search_pois(
                 connection,
@@ -544,7 +592,10 @@ try:
                 "Sector evidence": row["sector_status"],
             }
 
-            if search_mode == "Proximity Search":
+            if (
+                search_mode == "Proximity Search"
+                or (search_mode == "Natural Language Search" and nl_plan is not None and nl_plan.requires_origin)
+            ) and "distance_km" in row:
                 result_row["Distance (km)"] = round(
                     row["distance_km"],
                     3,
@@ -613,13 +664,13 @@ try:
         # marker/origin/circle synchronization has already been validated.
         map_results = results
         if (
-            search_mode == "Standard Search"
+            search_mode in {"Standard Search", "Natural Language Search"}
             and len(results) > STANDARD_MAP_MARKER_LIMIT
         ):
             map_results = results[:STANDARD_MAP_MARKER_LIMIT]
             st.caption(
                 f"Performance mode: showing {STANDARD_MAP_MARKER_LIMIT:,} of "
-                f"{len(results):,} result markers on the Standard Search map. "
+                f"{len(results):,} result markers on the browse-results map. "
                 "The results table remains complete."
             )
 
@@ -668,7 +719,10 @@ try:
                 ),
             ]
 
-            if search_mode == "Proximity Search":
+            if (
+                search_mode == "Proximity Search"
+                or (search_mode == "Natural Language Search" and nl_plan is not None and nl_plan.requires_origin)
+            ) and "distance_km" in row:
                 popup_lines.append(
                     f"Distance: {row['distance_km']:.3f} km"
                 )
@@ -880,7 +934,13 @@ try:
 
 
     else:
-        st.info("No places match the selected filters.")
+        if search_mode == "Natural Language Search" and not nl_query.strip():
+            st.info(
+                "Enter a natural-language query such as 'hospitals in F-6', "
+                "'nearest hospital', or 'emergency within 2 km'."
+            )
+        else:
+            st.info("No places match the query or selected filters.")
 except Exception as exc:
     st.error("Unable to load Islamabad GeoIntel.")
     st.exception(exc)
